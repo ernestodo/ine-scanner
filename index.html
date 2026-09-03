@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lector INE — Prototipo</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/zxing-library/0.20.0/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <style>
   :root{
     --ink:#1a1d1a;
@@ -319,7 +319,18 @@ function renderResult(raw){
   rawTextEl.textContent = raw;
 }
 
+if (typeof ZXing === 'undefined') {
+  setStatus('No se pudo cargar la librería ZXing (revisa tu conexión y recarga la página).');
+  startBtn.disabled = true;
+} else {
+  setStatus('Listo — toca "Iniciar cámara"');
+}
+
 startBtn.addEventListener('click', () => {
+  if (typeof ZXing === 'undefined') {
+    setStatus('ZXing sigue sin cargar. Recarga la página.');
+    return;
+  }
   const deviceId = devices[deviceIndex] ? devices[deviceIndex].deviceId : undefined;
   startScan(deviceId);
 });
