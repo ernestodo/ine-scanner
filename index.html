@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lector INE — Prototipo</title>
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   :root{
     --ink:#1a1d1a;
@@ -177,19 +178,76 @@
     font-size:0.8rem;
     padding:10px 0;
   }
+  .mrz-guide{
+    position:absolute;
+    left:6%;
+    right:6%;
+    bottom:6%;
+    height:22%;
+    border:1.5px dashed rgba(255,255,255,0.75);
+    border-radius:4px;
+    pointer-events:none;
+    display:none;
+  }
+  .mrz-guide.show{display:block;}
+  .qr-guide{
+    position:absolute;
+    top:8%;
+    right:6%;
+    width:26%;
+    height:26%;
+    border:1.5px dashed rgba(255,255,255,0.75);
+    border-radius:4px;
+    pointer-events:none;
+    display:none;
+  }
+  .qr-guide.show{display:block;}
+  .mode-tabs{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    gap:8px;
+    margin-bottom:12px;
+  }
+  .mode-tabs button{
+    flex:1;
+    background:transparent;
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  .mode-tabs button.active{
+    background:var(--ink);
+    color:var(--paper);
+    border-color:var(--ink);
+  }
+  .spinner{
+    display:inline-block;
+    width:9px;height:9px;
+    border-radius:50%;
+    border:2px solid var(--line);
+    border-top-color:var(--accent-soft);
+    animation:spin 0.7s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
 </style>
 </head>
 <body>
 
 <header>
   <h1>Lector de INE — prototipo</h1>
-  <p class="sub">Escanea el código de barras PDF417 del reverso de la credencial. Todo el procesamiento ocurre en tu navegador; nada se sube a un servidor.</p>
+  <p class="sub">Los dos cuadros bidimensionales grandes del reverso usan un formato propietario cifrado del INE y no se pueden leer con herramientas estándar. Este prototipo lee lo que sí es abierto: el QR pequeño y el texto MRZ. Todo el procesamiento ocurre en tu navegador.</p>
 </header>
+
+<div class="mode-tabs">
+  <button id="tabQr" class="active">QR pequeño</button>
+  <button id="tabMrz">Texto MRZ (OCR)</button>
+</div>
 
 <div class="stage">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div class="frame-guide"></div>
+  <div class="qr-guide show" id="qrGuide"></div>
+  <div class="mrz-guide" id="mrzGuide"></div>
 </div>
 
 <div class="status">
@@ -200,6 +258,7 @@
 <div class="controls">
   <button id="startBtn">Iniciar cámara</button>
   <button id="switchBtn" class="secondary" disabled>Cambiar cámara</button>
+  <button id="captureBtn" class="secondary" disabled style="display:none;">Capturar MRZ</button>
   <button id="resetBtn" class="secondary" disabled>Reiniciar</button>
 </div>
 
@@ -209,8 +268,11 @@
   <div class="raw" id="rawText"></div>
 </div>
 
-<p class="note">
-  Nota técnica: este prototipo decodifica el PDF417 con ZXing (open source) directamente en el navegador — es la capa de "lectura" del código de barras. El parseo de campos abajo usa una heurística genérica por separadores; el layout exacto del PDF417 del INE puede variar según la versión de la credencial, así que conviene ajustar el parser contra credenciales reales. No incluye validación de autenticidad ni detección de elementos de seguridad (hologramas, microtexto, etc.) — eso requiere un modelo de visión entrenado aparte.
+<p class="note" id="noteQr">
+  Nota técnica: el QR pequeño de la esquina es un código estándar (no cifrado) — ZXing lo decodifica directo en el navegador. Los dos cuadros grandes bidimensionales del reverso son un formato propietario del INE (desde el modelo 2019) pensado solo para su app oficial "Valida INE QR"; ninguna librería open source puede leerlos, no es un problema de resolución de cámara.
+</p>
+<p class="note" id="noteMrz" style="display:none;">
+  Nota técnica: esto corre OCR (Tesseract.js) sobre la franja del texto MRZ (las 3 líneas monoespaciadas). El MRZ va sin cifrar, así que el OCR sí puede extraerlo — pero la precisión depende de buena luz, encuadre y que la credencial esté plana y sin reflejos. Revisa el resultado contra la credencial física antes de confiar en los datos.
 </p>
 
 <script>
@@ -218,18 +280,26 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const startBtn = document.getElementById('startBtn');
 const switchBtn = document.getElementById('switchBtn');
+const captureBtn = document.getElementById('captureBtn');
 const resetBtn = document.getElementById('resetBtn');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const resultBlock = document.getElementById('resultBlock');
 const fieldsEl = document.getElementById('fields');
 const rawTextEl = document.getElementById('rawText');
+const qrGuide = document.getElementById('qrGuide');
+const mrzGuide = document.getElementById('mrzGuide');
+const tabQr = document.getElementById('tabQr');
+const tabMrz = document.getElementById('tabMrz');
+const noteQr = document.getElementById('noteQr');
+const noteMrz = document.getElementById('noteMrz');
 
 let codeReader = null;
-let currentStream = null;
 let devices = [];
 let deviceIndex = 0;
 let scanning = false;
+let mode = 'qr'; // 'qr' | 'mrz'
+let rawStream = null;
 
 function setStatus(text, mode){
   statusText.textContent = text;
@@ -242,31 +312,65 @@ async function listCameras(){
   switchBtn.disabled = devices.length < 2;
 }
 
+function setMode(newMode){
+  mode = newMode;
+  tabQr.classList.toggle('active', mode === 'qr');
+  tabMrz.classList.toggle('active', mode === 'mrz');
+  qrGuide.classList.toggle('show', mode === 'qr');
+  mrzGuide.classList.toggle('show', mode === 'mrz');
+  captureBtn.style.display = mode === 'mrz' ? 'inline-block' : 'none';
+  noteQr.style.display = mode === 'qr' ? 'block' : 'none';
+  noteMrz.style.display = mode === 'mrz' ? 'block' : 'none';
+  resultBlock.style.display = 'none';
+}
+
+async function startCameraRaw(deviceId){
+  const constraints = {
+    video: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      facingMode: deviceId ? undefined : { ideal: 'environment' },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      advanced: [{ focusMode: 'continuous' }]
+    },
+    audio: false
+  };
+  rawStream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = rawStream;
+  await video.play();
+}
+
 async function startScan(deviceId){
   setStatus('Iniciando cámara…');
   try{
-    codeReader = new ZXing.BrowserPDF417Reader();
-    const constraints = deviceId
-      ? { deviceId: { exact: deviceId } }
-      : { facingMode: { ideal: 'environment' } };
-
-    scanning = true;
     resetBtn.disabled = false;
     startBtn.disabled = true;
+    captureBtn.disabled = false;
 
-    await codeReader.decodeFromConstraints(
-      { video: constraints },
-      video,
-      (result, err) => {
-        if (result && scanning) {
-          onDecoded(result.getText());
+    if (mode === 'qr') {
+      codeReader = new ZXing.BrowserQRCodeReader();
+      scanning = true;
+      await codeReader.decodeFromConstraints(
+        {
+          video: {
+            deviceId: deviceId ? { exact: deviceId } : undefined,
+            facingMode: deviceId ? undefined : { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        },
+        video,
+        (result) => {
+          if (result && scanning) onDecodedQr(result.getText());
         }
-        // NotFoundException fires continuously while scanning — that's expected, ignore it.
-      }
-    );
+      );
+      setStatus('Buscando QR pequeño…', 'live');
+    } else {
+      await startCameraRaw(deviceId);
+      setStatus('Encuadra el texto MRZ y toca "Capturar MRZ"', 'live');
+    }
 
     if (!devices.length) await listCameras();
-    setStatus('Buscando código de barras…', 'live');
   } catch (e) {
     console.error(e);
     setStatus('No se pudo acceder a la cámara: ' + e.message);
@@ -280,38 +384,73 @@ function stopScan(){
     codeReader.reset();
     codeReader = null;
   }
+  if (rawStream) {
+    rawStream.getTracks().forEach(t => t.stop());
+    rawStream = null;
+  }
 }
 
-function onDecoded(text){
+function onDecodedQr(text){
   if (!scanning) return;
   scanning = false;
-  setStatus('Código detectado', 'found');
+  setStatus('QR detectado', 'found');
   stopScan();
-  renderResult(text);
+  renderQrResult(text);
 }
 
-// Heurística de parseo — el PDF417 del INE suele separar campos con saltos de línea.
-// Esto es orientativo: ajusta contra credenciales reales, el formato varía por versión.
-function parseIneBarcode(raw){
-  const lines = raw.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
-  return {
-    lineas_detectadas: lines.length,
-    contenido: lines
-  };
-}
-
-function renderResult(raw){
+function renderQrResult(raw){
   resultBlock.style.display = 'block';
-  const parsed = parseIneBarcode(raw);
-
   fieldsEl.innerHTML = '';
-  if (parsed.contenido.length === 0){
-    fieldsEl.innerHTML = '<div class="empty">No se pudieron separar campos automáticamente — revisa el texto crudo abajo.</div>';
+  const row = document.createElement('div');
+  row.className = 'field-row';
+  row.innerHTML = '<span class="k">contenido del QR</span><span class="v"></span>';
+  row.querySelector('.v').textContent = raw;
+  fieldsEl.appendChild(row);
+  rawTextEl.textContent = raw;
+}
+
+async function captureAndOcr(){
+  if (!rawStream) return;
+  captureBtn.disabled = true;
+  setStatus('Leyendo texto (esto tarda unos segundos)…', 'live');
+
+  // Recorta solo la franja inferior donde vive el MRZ, según el guide visual.
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cropX = vw * 0.06;
+  const cropY = vh * 0.72;
+  const cropW = vw * 0.88;
+  const cropH = vh * 0.22;
+
+  canvas.width = cropW;
+  canvas.height = cropH;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+  try {
+    const { data } = await Tesseract.recognize(canvas, 'eng', {
+      // MRZ usa un alfabeto restringido: mayúsculas, dígitos y '<'
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'
+    });
+    renderMrzResult(data.text);
+    setStatus('Texto MRZ capturado', 'found');
+  } catch (e) {
+    console.error(e);
+    setStatus('Error al leer el texto: ' + e.message);
+  }
+  captureBtn.disabled = false;
+}
+
+function renderMrzResult(raw){
+  resultBlock.style.display = 'block';
+  const lines = raw.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+  fieldsEl.innerHTML = '';
+  if (lines.length === 0){
+    fieldsEl.innerHTML = '<div class="empty">No se detectó texto — reintenta con mejor luz y encuadre.</div>';
   } else {
-    parsed.contenido.forEach((line, i) => {
+    lines.forEach((line, i) => {
       const row = document.createElement('div');
       row.className = 'field-row';
-      row.innerHTML = `<span class="k">campo ${i + 1}</span><span class="v"></span>`;
+      row.innerHTML = `<span class="k">línea ${i + 1}</span><span class="v"></span>`;
       row.querySelector('.v').textContent = line;
       fieldsEl.appendChild(row);
     });
@@ -319,16 +458,19 @@ function renderResult(raw){
   rawTextEl.textContent = raw;
 }
 
-if (typeof ZXing === 'undefined') {
-  setStatus('No se pudo cargar la librería ZXing (revisa tu conexión y recarga la página).');
+if (typeof ZXing === 'undefined' || typeof Tesseract === 'undefined') {
+  setStatus('No se pudieron cargar las librerías (revisa tu conexión y recarga la página).');
   startBtn.disabled = true;
 } else {
   setStatus('Listo — toca "Iniciar cámara"');
 }
 
+tabQr.addEventListener('click', () => { stopScan(); setMode('qr'); setStatus('Listo — toca "Iniciar cámara"'); startBtn.disabled = false; resetBtn.disabled = true; });
+tabMrz.addEventListener('click', () => { stopScan(); setMode('mrz'); setStatus('Listo — toca "Iniciar cámara"'); startBtn.disabled = false; resetBtn.disabled = true; });
+
 startBtn.addEventListener('click', () => {
-  if (typeof ZXing === 'undefined') {
-    setStatus('ZXing sigue sin cargar. Recarga la página.');
+  if (typeof ZXing === 'undefined' || typeof Tesseract === 'undefined') {
+    setStatus('Las librerías siguen sin cargar. Recarga la página.');
     return;
   }
   const deviceId = devices[deviceIndex] ? devices[deviceIndex].deviceId : undefined;
@@ -341,6 +483,8 @@ switchBtn.addEventListener('click', () => {
   stopScan();
   startScan(devices[deviceIndex].deviceId);
 });
+
+captureBtn.addEventListener('click', captureAndOcr);
 
 resetBtn.addEventListener('click', () => {
   stopScan();
