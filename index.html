@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lector INE — Prototipo</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/zxing-library/0.20.0/index.min.js"></script>
+<style>
+  :root{
+    --ink:#1a1d1a;
+    --paper:#f6f4ee;
+    --line:#c9c2b0;
+    --accent:#8a3324;
+    --accent-soft:#c96a4f;
+    --ok:#2f5d3a;
+    --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+    --serif: 'Source Serif Pro', Georgia, serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--mono);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:24px 16px 60px;
+  }
+  header{
+    width:100%;
+    max-width:520px;
+    margin-bottom:20px;
+  }
+  h1{
+    font-family:var(--serif);
+    font-weight:600;
+    font-size:1.55rem;
+    margin:0 0 4px;
+    letter-spacing:-0.01em;
+  }
+  .sub{
+    font-size:0.82rem;
+    color:#5a5648;
+    line-height:1.5;
+    margin:0;
+  }
+  .stage{
+    width:100%;
+    max-width:520px;
+    background:#111310;
+    border-radius:2px;
+    overflow:hidden;
+    position:relative;
+    aspect-ratio:16/10;
+    border:1px solid var(--line);
+  }
+  video, canvas{
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    display:block;
+  }
+  canvas{display:none;}
+  .frame-guide{
+    position:absolute;
+    inset:18% 8%;
+    border:1.5px dashed rgba(255,255,255,0.55);
+    border-radius:6px;
+    pointer-events:none;
+  }
+  .frame-guide::after{
+    content:'reverso del INE — código de barras aquí';
+    position:absolute;
+    bottom:-26px;
+    left:0;
+    right:0;
+    text-align:center;
+    font-size:0.68rem;
+    color:rgba(255,255,255,0.6);
+    letter-spacing:0.02em;
+  }
+  .status{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    margin-top:14px;
+    font-size:0.78rem;
+    color:#5a5648;
+  }
+  .dot{
+    width:7px;height:7px;border-radius:50%;
+    background:var(--line);
+    flex-shrink:0;
+  }
+  .dot.live{background:var(--accent-soft); animation:pulse 1.4s infinite;}
+  .dot.found{background:var(--ok); animation:none;}
+  @keyframes pulse{
+    0%,100%{opacity:1;} 50%{opacity:0.35;}
+  }
+  .controls{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    gap:10px;
+    margin-top:16px;
+  }
+  button{
+    font-family:var(--mono);
+    font-size:0.82rem;
+    padding:10px 16px;
+    border-radius:2px;
+    border:1px solid var(--ink);
+    background:var(--ink);
+    color:var(--paper);
+    cursor:pointer;
+  }
+  button.secondary{
+    background:transparent;
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  button:disabled{
+    opacity:0.4;
+    cursor:not-allowed;
+  }
+  .result{
+    width:100%;
+    max-width:520px;
+    margin-top:22px;
+    border-top:1px solid var(--line);
+    padding-top:18px;
+  }
+  .result h2{
+    font-family:var(--serif);
+    font-size:1rem;
+    font-weight:600;
+    margin:0 0 10px;
+  }
+  .field-row{
+    display:flex;
+    justify-content:space-between;
+    gap:12px;
+    padding:7px 0;
+    border-bottom:1px solid #e6e1d3;
+    font-size:0.82rem;
+  }
+  .field-row .k{color:#5a5648;}
+  .field-row .v{text-align:right; word-break:break-word;}
+  .raw{
+    margin-top:16px;
+    font-size:0.7rem;
+    color:#5a5648;
+    background:#eeeadd;
+    padding:10px;
+    border-radius:2px;
+    word-break:break-all;
+    white-space:pre-wrap;
+    max-height:140px;
+    overflow-y:auto;
+  }
+  .note{
+    width:100%;
+    max-width:520px;
+    margin-top:22px;
+    font-size:0.72rem;
+    color:#7a7562;
+    line-height:1.6;
+    border-left:2px solid var(--accent-soft);
+    padding-left:12px;
+  }
+  .empty{
+    color:#8a8570;
+    font-size:0.8rem;
+    padding:10px 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Lector de INE — prototipo</h1>
+  <p class="sub">Escanea el código de barras PDF417 del reverso de la credencial. Todo el procesamiento ocurre en tu navegador; nada se sube a un servidor.</p>
+</header>
+
+<div class="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div class="frame-guide"></div>
+</div>
+
+<div class="status">
+  <span class="dot" id="statusDot"></span>
+  <span id="statusText">Esperando permiso de cámara…</span>
+</div>
+
+<div class="controls">
+  <button id="startBtn">Iniciar cámara</button>
+  <button id="switchBtn" class="secondary" disabled>Cambiar cámara</button>
+  <button id="resetBtn" class="secondary" disabled>Reiniciar</button>
+</div>
+
+<div class="result" id="resultBlock" style="display:none;">
+  <h2>Datos detectados</h2>
+  <div id="fields"></div>
+  <div class="raw" id="rawText"></div>
+</div>
+
+<p class="note">
+  Nota técnica: este prototipo decodifica el PDF417 con ZXing (open source) directamente en el navegador — es la capa de "lectura" del código de barras. El parseo de campos abajo usa una heurística genérica por separadores; el layout exacto del PDF417 del INE puede variar según la versión de la credencial, así que conviene ajustar el parser contra credenciales reales. No incluye validación de autenticidad ni detección de elementos de seguridad (hologramas, microtexto, etc.) — eso requiere un modelo de visión entrenado aparte.
+</p>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const startBtn = document.getElementById('startBtn');
+const switchBtn = document.getElementById('switchBtn');
+const resetBtn = document.getElementById('resetBtn');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const resultBlock = document.getElementById('resultBlock');
+const fieldsEl = document.getElementById('fields');
+const rawTextEl = document.getElementById('rawText');
+
+let codeReader = null;
+let currentStream = null;
+let devices = [];
+let deviceIndex = 0;
+let scanning = false;
+
+function setStatus(text, mode){
+  statusText.textContent = text;
+  statusDot.className = 'dot' + (mode ? ' ' + mode : '');
+}
+
+async function listCameras(){
+  const all = await navigator.mediaDevices.enumerateDevices();
+  devices = all.filter(d => d.kind === 'videoinput');
+  switchBtn.disabled = devices.length < 2;
+}
+
+async function startScan(deviceId){
+  setStatus('Iniciando cámara…');
+  try{
+    codeReader = new ZXing.BrowserPDF417Reader();
+    const constraints = deviceId
+      ? { deviceId: { exact: deviceId } }
+      : { facingMode: { ideal: 'environment' } };
+
+    scanning = true;
+    resetBtn.disabled = false;
+    startBtn.disabled = true;
+
+    await codeReader.decodeFromConstraints(
+      { video: constraints },
+      video,
+      (result, err) => {
+        if (result && scanning) {
+          onDecoded(result.getText());
+        }
+        // NotFoundException fires continuously while scanning — that's expected, ignore it.
+      }
+    );
+
+    if (!devices.length) await listCameras();
+    setStatus('Buscando código de barras…', 'live');
+  } catch (e) {
+    console.error(e);
+    setStatus('No se pudo acceder a la cámara: ' + e.message);
+    startBtn.disabled = false;
+  }
+}
+
+function stopScan(){
+  scanning = false;
+  if (codeReader) {
+    codeReader.reset();
+    codeReader = null;
+  }
+}
+
+function onDecoded(text){
+  if (!scanning) return;
+  scanning = false;
+  setStatus('Código detectado', 'found');
+  stopScan();
+  renderResult(text);
+}
+
+// Heurística de parseo — el PDF417 del INE suele separar campos con saltos de línea.
+// Esto es orientativo: ajusta contra credenciales reales, el formato varía por versión.
+function parseIneBarcode(raw){
+  const lines = raw.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+  return {
+    lineas_detectadas: lines.length,
+    contenido: lines
+  };
+}
+
+function renderResult(raw){
+  resultBlock.style.display = 'block';
+  const parsed = parseIneBarcode(raw);
+
+  fieldsEl.innerHTML = '';
+  if (parsed.contenido.length === 0){
+    fieldsEl.innerHTML = '<div class="empty">No se pudieron separar campos automáticamente — revisa el texto crudo abajo.</div>';
+  } else {
+    parsed.contenido.forEach((line, i) => {
+      const row = document.createElement('div');
+      row.className = 'field-row';
+      row.innerHTML = `<span class="k">campo ${i + 1}</span><span class="v"></span>`;
+      row.querySelector('.v').textContent = line;
+      fieldsEl.appendChild(row);
+    });
+  }
+  rawTextEl.textContent = raw;
+}
+
+startBtn.addEventListener('click', () => {
+  const deviceId = devices[deviceIndex] ? devices[deviceIndex].deviceId : undefined;
+  startScan(deviceId);
+});
+
+switchBtn.addEventListener('click', () => {
+  if (devices.length < 2) return;
+  deviceIndex = (deviceIndex + 1) % devices.length;
+  stopScan();
+  startScan(devices[deviceIndex].deviceId);
+});
+
+resetBtn.addEventListener('click', () => {
+  stopScan();
+  resultBlock.style.display = 'none';
+  fieldsEl.innerHTML = '';
+  rawTextEl.textContent = '';
+  startBtn.disabled = false;
+  resetBtn.disabled = true;
+  setStatus('Esperando permiso de cámara…');
+});
+</script>
+
+</body>
+</html>
